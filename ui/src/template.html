@@ -1,0 +1,561 @@
+<div id="app" :class="['app-root', `theme-${themeMode}`]" :data-theme="themeMode" v-cloak>
+      <workflow-builder v-if="isWorkflowBuilderMode" :theme="themeMode" @toggle-theme="toggleTheme"></workflow-builder>
+      <main v-else-if="isExecutionDetailMode" class="shell">
+        <header class="hero panel">
+          <button class="theme-toggle" type="button" :aria-pressed="themeMode === 'dark'" aria-label="切换浅色和深色主题" @click="toggleTheme">
+            <span class="theme-toggle-label">浅色</span>
+            <span class="theme-toggle-track">
+              <span class="theme-toggle-thumb"></span>
+            </span>
+            <span class="theme-toggle-label">深色</span>
+          </button>
+          <div class="hero-copy">
+            <p class="eyebrow">Execution Detail</p>
+            <h1>执行轨迹详情</h1>
+            <p class="lede">
+              单次实验执行的门控状态、原始数据包、模型建议和闭环事件都集中在这个页面里。
+            </p>
+            <div class="hero-actions">
+              <button class="action action-secondary" @click="refreshExecutionDetail">刷新详情</button>
+              <button class="action action-secondary" type="button" @click="goBack()">返回上一页</button>
+            </div>
+          </div>
+        </header>
+
+        <section class="strip panel">
+          <div class="strip-title">
+            <span>Execution Detail</span>
+            <small>{{ lastUpdatedText }}</small>
+          </div>
+          <label class="toggle">
+            <input v-model="autoRefreshEnabled" type="checkbox" />
+            <span>自动刷新</span>
+          </label>
+          <div :class="['message', message.tone]">{{ message.text }}</div>
+        </section>
+
+        <section v-if="detailExecution" class="panel monitor-panel">
+          <div class="section-head compact">
+            <div>
+              <p class="section-kicker">Run Detail</p>
+              <h2>{{ scheduleName(detailExecution) }}</h2>
+            </div>
+            <p class="section-copy">运行批次 {{ executionBatch(detailExecution) }} · 第 {{ executionRound(detailExecution) }} 轮</p>
+          </div>
+          <div class="meta-grid">
+            <span class="pill">执行 ID: {{ detailExecution.id }}</span>
+            <span :class="['status-badge', detailExecution.status]">{{ statusLabel(detailExecution.status) }}</span>
+            <span class="pill">派发时间: {{ formatDateTime(detailExecution.dispatched_at) }}</span>
+            <span class="pill">关闭时间: {{ detailExecution.closed_at ? formatDateTime(detailExecution.closed_at) : "-" }}</span>
+            <span class="pill">反馈分: {{ detailExecution.feedback_score ?? "-" }}</span>
+            <span class="pill">耗时: {{ detailExecution.latency_ms ?? "-" }} ms</span>
+          </div>
+          <div class="monitor-dashboard">
+              <div class="visual-card visual-card-flow">
+                <div class="chart-card-head">
+                  <div>
+                    <p class="chart-kicker">Gate Graph</p>
+                    <h3>执行门控图</h3>
+                  </div>
+                <span :class="['gate-pill', `gate-${executionMonitorGateStatus(detailExecution)}`]">
+                  {{ executionMonitorGateLabel(detailExecution) }}
+                </span>
+              </div>
+                <div class="chart-frame chart-frame-monitor chart-frame-monitor-detail">
+                  <dynamic-flow-panel v-if="detailExecution.workflow_runtime?.graph"
+                    :runtime="detailExecution.workflow_runtime" :health="workflowHealth"
+                    :schedule-name="scheduleName(detailExecution)" :batch-label="executionBatch(detailExecution)" height="560px"
+                    @refresh="refreshExecutionDetail"
+                  ></dynamic-flow-panel>
+                  <div v-else-if="detailExecution.dispatch_payload?.workflow_version_id" class="wf-runtime-missing" role="status">固定版本流程图未加载，请刷新重试。</div>
+                  <flow-monitor-panel v-else
+                    :monitor="executionMonitor(detailExecution)"
+                    :schedule-name="detailExecution ? scheduleName(detailExecution) : '执行详情'"
+                    :batch-label="detailExecution ? executionBatch(detailExecution) : '未知批次'"
+                    height="560px"
+                  />
+                </div>
+              </div>
+            <aside class="monitor-sidebar">
+              <article class="signal-card">
+                <span class="signal-label">执行摘要</span>
+                <strong>{{ workflowSummary(detailExecution) }}</strong>
+                <p>{{ workflowMissingText(detailExecution) }}</p>
+              </article>
+              <article v-if="executionSamplePlan" class="signal-card signal-card-muted">
+                <span class="signal-label">样品计划</span>
+                <strong>{{ executionSamplePlan.total_samples }} 个样品点</strong>
+                <p>{{ executionSamplePlan.rows || "-" }} × {{ executionSamplePlan.cols || "-" }} · {{ executionSamplePlan.round_sample_id || "-" }}</p>
+              </article>
+            </aside>
+          </div>
+        </section>
+
+        <section v-if="detailExecution" class="metrics-grid detail-grid">
+          <article class="metric-card">
+            <div class="metric-label">数据包</div>
+            <div class="metric-value">{{ detailDataPackages.length }}</div>
+            <div class="metric-meta">当前执行回写的数据包数量</div>
+          </article>
+          <article class="metric-card">
+            <div class="metric-label">建议数</div>
+            <div class="metric-value">{{ detailRecommendations.length }}</div>
+            <div class="metric-meta">与当前执行关联的推荐记录</div>
+          </article>
+          <article class="metric-card">
+            <div class="metric-label">事件数</div>
+            <div class="metric-value">{{ detailEvents.length }}</div>
+            <div class="metric-meta">闭环生命周期事件</div>
+          </article>
+        </section>
+
+        <section v-if="detailRecommendations.length" class="panel timeline">
+          <div class="section-head compact">
+            <div>
+              <p class="section-kicker">Recommendations</p>
+              <h2>模型建议</h2>
+            </div>
+          </div>
+          <div class="timeline-list">
+            <article v-for="item in detailRecommendations" :key="item.recommendation_id || item.schedule_id" class="timeline-card">
+              <div class="timeline-card-head">
+                <div>
+                  <h3>{{ item.summary }}</h3>
+                  <p class="meta-line">置信度 {{ item.confidence }} · {{ item.model_id || "-" }}</p>
+                </div>
+              </div>
+              <div class="timeline-tags">
+                <span class="pill">来源执行: {{ item.source_execution_id || "-" }}</span>
+                <span class="pill">动作: {{ item.suggested_payload?.next_action || "-" }}</span>
+                <span class="pill" v-if="item.suggested_payload?.mat_model_candidate_rank !== undefined && item.suggested_payload?.mat_model_candidate_rank !== null">候选 #{{ item.suggested_payload.mat_model_candidate_rank }}</span>
+              </div>
+              <p class="meta-line">{{ compositionSummary(item.suggested_payload || {}) }}</p>
+            </article>
+          </div>
+        </section>
+
+        <section v-if="detailDataPackages.length" class="panel timeline">
+          <div class="section-head compact">
+            <div>
+              <p class="section-kicker">Data Packages</p>
+              <h2>数据包明细</h2>
+            </div>
+          </div>
+          <div class="timeline-list">
+            <article v-for="item in detailDataPackages" :key="item.id" class="timeline-card">
+              <div class="timeline-card-head">
+                <div>
+                  <h3>{{ item.instrument_code }}</h3>
+                  <p class="meta-line">{{ item.component_id || "-" }} · {{ item.validation_status }}</p>
+                </div>
+              </div>
+              <div class="timeline-tags">
+                <span class="pill">数据包: {{ item.id }}</span>
+                <span class="pill">记录: {{ item.manage_db_record_id || "-" }}</span>
+                <span class="pill">样品: {{ item.sample_id || "-" }}</span>
+              </div>
+              <p class="meta-line">{{ item.note || "无备注" }}</p>
+            </article>
+          </div>
+        </section>
+
+        <section v-if="detailEvents.length" class="panel timeline">
+          <div class="section-head compact">
+            <div>
+              <p class="section-kicker">Closed Loop Events</p>
+              <h2>闭环事件流</h2>
+            </div>
+          </div>
+          <div class="timeline-list">
+            <article v-for="item in detailEvents" :key="item.id" class="timeline-card">
+              <div class="timeline-card-head">
+                <div>
+                  <h3>{{ item.event_type }}</h3>
+                  <p class="meta-line">{{ formatDateTime(item.created_at) }}</p>
+                </div>
+              </div>
+              <div class="timeline-tags">
+                <span class="pill">事件 ID: {{ item.id }}</span>
+                <span class="pill">run: {{ item.run_id || "-" }}</span>
+                <span class="pill">data_package: {{ item.data_package_id || "-" }}</span>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <div v-if="!detailExecution && !detailLoading" class="empty-state">没有找到对应执行详情。</div>
+      </main>
+      <main v-else class="shell dashboard-shell" :class="{'wf-dynamic-dashboard':currentMonitorDisplayExecution?.workflow_runtime?.graph}">
+      <template v-if="!isExecutionDetailMode">
+        <div class="dashboard-layout">
+        <div class="dashboard-main">
+        <header class="hero panel hero-dashboard">
+          <a class="wf-home-builder-link wf-icon-button" href="/?view=workflow-builder" title="流程编排" aria-label="打开流程编排"><git-branch :size="20"></git-branch></a>
+          <button class="theme-toggle" type="button" :aria-pressed="themeMode === 'dark'" aria-label="切换浅色和深色主题" @click="toggleTheme">
+            <span class="theme-toggle-label">浅色</span>
+            <span class="theme-toggle-track">
+              <span class="theme-toggle-thumb"></span>
+            </span>
+            <span class="theme-toggle-label">深色</span>
+          </button>
+          <div class="hero-copy">
+            <h1>四元薄膜硬度闭环反馈调度台</h1>
+          </div>
+        </header>
+
+        <div class="dashboard-workbench">
+          <aside class="dashboard-sidebar">
+            <div v-if="currentMonitorDisplayExecution" :class="['stage-list', 'dashboard-stage-list', {'workflow-stages':currentMonitorDisplayExecution.workflow_runtime?.graph}]">
+              <article
+                v-for="node in executionFlowNodes(currentMonitorDisplayExecution)"
+                :key="`dashboard-stage-${node.code}`"
+                :class="['stage-card', `stage-${node.status}`]"
+                :role="node.nodeRunId ? 'button' : undefined"
+                :tabindex="node.nodeRunId ? 0 : undefined"
+                @click="node.nodeRunId && $refs.dynamicFlow?.selectNode(node.code)"
+                @keydown.enter="node.nodeRunId && $refs.dynamicFlow?.selectNode(node.code)"
+              >
+                <div class="stage-card-head">
+                  <div class="stage-title">
+                    <span :class="['stage-dot', `dot-${node.status}`]"></span>
+                    <strong>{{ node.title }}</strong>
+                  </div>
+                  <span :class="['stage-state-badge', `state-${node.status}`]">
+                    {{ node.statusLabel || stageStateLabel(node.status, node.code) }}
+                  </span>
+                </div>
+                <p class="meta-line">{{ node.componentId || "系统节点" }}</p>
+                <p class="meta-line">{{ node.detail }}</p>
+              </article>
+            </div>
+          </aside>
+
+          <div class="dashboard-center">
+            <section class="panel monitor-panel dashboard-panel dashboard-panel-monitor">
+              <div v-if="currentMonitorDisplayExecution" class="flow-monitor-shell">
+                <div class="chart-head-actions flow-chart-actions flow-chart-actions-overlay">
+                  <button
+                    v-if="currentMonitorDisplayExecution"
+                    type="button"
+                    class="round-chip"
+                  >
+                    当前轮次 R{{ executionRound(currentMonitorDisplayExecution) }}
+                  </button>
+                  <span :class="['gate-pill', `gate-${executionMonitorGateStatus(currentMonitorDisplayExecution)}`]">
+                    {{ executionMonitorGateLabel(currentMonitorDisplayExecution) }}
+                  </span>
+                </div>
+                <dynamic-flow-panel
+                  v-if="currentMonitorDisplayExecution.workflow_runtime?.graph"
+                  ref="dynamicFlow"
+                  :runtime="currentMonitorDisplayExecution.workflow_runtime"
+                  :health="workflowHealth"
+                  :schedule-name="scheduleName(currentMonitorDisplayExecution)"
+                  :batch-label="executionBatch(currentMonitorDisplayExecution)"
+                  height="677px"
+                  @refresh="refreshDashboard"
+                ></dynamic-flow-panel>
+                <div v-else-if="currentMonitorDisplayExecution.dispatch_payload?.workflow_version_id" class="wf-runtime-missing" role="status">固定版本流程图未加载，请刷新重试。</div>
+                <flow-monitor-panel v-else
+                  :monitor="executionMonitor(currentMonitorDisplayExecution)"
+                  :schedule-name="currentMonitorDisplayExecution ? scheduleName(currentMonitorDisplayExecution) : '暂无调度'"
+                  :batch-label="currentMonitorDisplayExecution ? executionBatch(currentMonitorDisplayExecution) : '等待批次派发'"
+                  height="677px"
+                  initial-align="left"
+                />
+                <div v-if="!currentMonitorDisplayExecution.workflow_runtime" class="form-hint monitor-hint">{{ workflowMissingText(currentMonitorDisplayExecution) }}</div>
+              </div>
+              <div v-else class="empty-state">还没有可监控的执行轮次。</div>
+            </section>
+          </div>
+
+          <section class="panel recommendations dashboard-panel dashboard-panel-prediction">
+              <div class="section-head compact prediction-section-head">
+                <p class="section-kicker">Prediction Deck</p>
+                <h2 v-if="currentRoundProgress">当前执行预测结果 — 第 {{ currentRoundProgress.round }} 轮 · 目标硬度 {{ editableTargetSchedule ? activeTargetHardnessDraft : '—' }} GPa</h2>
+                <h2 v-else>预测结果与下一轮建议</h2>
+              </div>
+              <article v-if="predictionDeckData" class="exp-card prediction-card">
+                <div class="recommendation-layout recommendation-layout-stacked">
+                  <div class="chart-frame chart-frame-soft">
+                    <composition-range-panel
+                      :space="predictionDeckData.rangeSpace"
+                      :theme="predictionDeckData.rangeTheme"
+                      height="100%"
+                    />
+                  </div>
+                  <div class="recommendation-side">
+                    <div class="paired-element-grid">
+                      <article
+                        v-for="row in predictionElementCards(predictionDeckData.source)"
+                        :key="`${predictionDeckData.rowKeyPrefix}-${row.key}`"
+                        class="paired-element-column"
+                      >
+                        <div class="interval-mini-card">
+                          <span class="interval-mini-label">{{ row.label }}成分</span>
+                          <strong>{{ row.min }} - {{ row.max }}</strong>
+                          <small>P50 {{ row.p50 }} at.%</small>
+                        </div>
+                        <div class="interval-mini-card power-mini-card">
+                          <span class="interval-mini-label">{{ row.label }}功率</span>
+                          <strong>{{ row.power }}</strong>
+                        </div>
+                      </article>
+                    </div>
+                  </div>
+                </div>
+              </article>
+              <div v-else class="empty-state">当前还没有可展示的预测区间。</div>
+            </section>
+
+          <section class="panel composer dashboard-panel dashboard-panel-composer">
+            <div class="composer-head">
+              <span class="composer-head-inline">
+                <span class="section-kicker">{{ dashboardComposerMode === "create" ? "Loop Composer" : "Loop Stage" }}</span>
+                <span class="composer-head-title">{{ dashboardComposerMode === "create" ? "新建 Ti-Zr-Nb-V 实验调度" : "当前轮次推进中" }}</span>
+              </span>
+            </div>
+
+            <div class="composer-top-row">
+              <article v-if="editableTargetSchedule" class="field-panel target-control-panel">
+                <div class="chart-card-head target-control-head">
+                  <div>
+                    <p class="chart-kicker">Target Hardness</p>
+                    <h3>当前调度目标硬度</h3>
+                  </div>
+                  <span class="pill">{{ editableTargetSchedule.name }}</span>
+                </div>
+                <div class="target-control-grid">
+                  <label class="field-stack">
+                    <span>目标硬度 (GPa)</span>
+                    <input
+                      v-model="activeTargetHardnessDraft"
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      placeholder="例如 13.5"
+                      @input="markActiveTargetHardnessDirty"
+                    />
+                  </label>
+                  <div class="form-actions composer-actions target-control-actions">
+                    <button
+                      class="action action-secondary"
+                      type="button"
+                      :disabled="isPending(actionKey('target', editableTargetSchedule.id))"
+                      @click="saveActiveTargetHardness"
+                    >
+                      保存目标硬度
+                    </button>
+                  </div>
+                </div>
+              </article>
+
+              <div v-if="dashboardComposerMode === 'create'" class="card-stack stage-explain-stack">
+                <article class="signal-card composer-note-card">
+                  <span class="signal-label">阶段说明</span>
+                  <strong>新建调度</strong>
+                  <p>填写目标硬度和预测成分区间，确认无误后创建新调度。</p>
+                </article>
+              </div>
+
+              <div v-else class="card-stack stage-explain-stack">
+                <article class="signal-card composer-note-card">
+                  <span class="signal-label">阶段说明</span>
+                  <strong>{{ activeSchedule?.name || "当前闭环正在运行" }}</strong>
+                </article>
+                <article v-if="primaryRecommendation" class="signal-card composer-note-card">
+                  <span class="signal-label">自动应用状态</span>
+                  <strong>{{ primaryRecommendation.summary || "下一轮建议已生成" }}</strong>
+                  <p>{{ compositionSummary(primaryRecommendation.suggested_payload || {}) }}</p>
+                </article>
+              </div>
+
+              <article class="field-panel progress-tracker-panel">
+                <div class="chart-card-head">
+                  <div>
+                    <p class="chart-kicker">Progress</p>
+                    <h3>进度跟踪</h3>
+                  </div>
+                </div>
+                <div class="progress-arc-wrap">
+                  <svg class="progress-arc" viewBox="0 0 240 140">
+                    <defs>
+                      <linearGradient id="arcGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                        <stop offset="0%" stop-color="#06b6d4" />
+                        <stop offset="50%" stop-color="#0e7490" />
+                        <stop offset="100%" stop-color="#a855f7" />
+                      </linearGradient>
+                      <filter id="arcGlow">
+                        <feGaussianBlur stdDeviation="2.5" result="blur" />
+                        <feMerge>
+                          <feMergeNode in="blur" />
+                          <feMergeNode in="SourceGraphic" />
+                        </feMerge>
+                      </filter>
+                      <filter id="nodeGlow">
+                        <feGaussianBlur stdDeviation="3" result="blur" />
+                        <feMerge>
+                          <feMergeNode in="blur" />
+                          <feMergeNode in="SourceGraphic" />
+                        </feMerge>
+                      </filter>
+                    </defs>
+                    <!-- outer dashed ring (full circle, decorative) -->
+                    <circle class="progress-outer-ring" cx="120" cy="120" r="100" />
+                    <!-- background arc -->
+                    <path class="progress-arc-bg" d="M 30 120 A 90 90 0 0 1 210 120" />
+                    <!-- track arc -->
+                    <path class="progress-arc-track" d="M 30 120 A 90 90 0 0 1 210 120" />
+                    <!-- fill arc -->
+                    <path
+                      class="progress-arc-fill"
+                      :d="currentRoundProgress.arcD"
+                      :stroke-dasharray="`${currentRoundProgress.percent * 2.827} 282.74`"
+                      :class="{ 'arc-done': currentRoundProgress.percent >= 100 }"
+                      filter="url(#arcGlow)"
+                    />
+                    <!-- inner dashed ring (decorative) -->
+                    <circle class="progress-inner-ring" cx="120" cy="120" r="78" />
+                    <!-- trailing dot -->
+                    <circle
+                      class="progress-arc-node"
+                      :cx="currentRoundProgress.nodeX"
+                      :cy="currentRoundProgress.nodeY"
+                      v-show="currentRoundProgress.percent > 0"
+                      filter="url(#nodeGlow)"
+                    />
+                  </svg>
+                  <div class="progress-arc-label">
+                    <strong class="pct-num">{{ currentRoundProgress.percent }}%</strong>
+                    <span class="pct-round">R{{ currentRoundProgress.round }}</span>
+                  </div>
+                </div>
+                <p class="progress-arc-meta" v-show="false">{{ currentRoundProgress.label }}</p>
+              </article>
+            </div>
+
+            <form v-if="dashboardComposerMode === 'create'" class="composer-form" @submit.prevent="createSchedule">
+              <div class="composer-grid">
+                <section class="composer-main visual-card">
+                  <div class="chart-card-head">
+                    <div>
+                      <p class="chart-kicker">Range Envelope</p>
+                      <h3>当前预测成分区间</h3>
+                    </div>
+                    <span class="pill">P10 / P50 / P90</span>
+                  </div>
+                  <div class="chart-frame chart-frame-soft">
+                    <composition-range-panel
+                      :space="predictedCompositionSpace"
+                      theme="warm"
+                      height="360px"
+                    />
+                  </div>
+                </section>
+
+                <aside class="composer-side">
+                  <div class="interval-mini-grid compact composer-intervals">
+                    <article v-for="row in predictedIntervalRows" :key="row.key" class="interval-mini-card">
+                      <span class="interval-mini-label">{{ row.label }}</span>
+                      <strong>{{ row.min }} - {{ row.max }}</strong>
+                      <small>P50 {{ row.p50 }} at.%</small>
+                    </article>
+                  </div>
+
+                  <article class="signal-card composer-note-card">
+                    <span class="signal-label">约束说明</span>
+                    <p>四元素总和恒为 100 at.%；当前展示的是联合预测空间摘要，不代表四个区间可以任意自由组合。</p>
+                  </article>
+
+                  <section class="field-panel">
+                    <label class="field-stack">
+                      <span>目标硬度 (GPa)</span>
+                      <input
+                        v-model="scheduleForm.target_hardness_gpa"
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        placeholder="例如 13.5"
+                        required
+                      />
+                    </label>
+                    <div class="form-actions composer-actions">
+                      <button
+                        class="action action-primary"
+                        type="submit"
+                        :disabled="isPending('schedule:create') || !modelSpace"
+                      >
+                        创建调度
+                      </button>
+                    </div>
+                  </section>
+                </aside>
+              </div>
+            </form>
+          </section>
+        </div>
+
+          <section class="panel timeline dashboard-panel dashboard-panel-timeline">
+            <div class="section-head compact">
+              <div>
+                <p class="section-kicker">Recent Runs</p>
+                <h2>最近执行轨迹</h2>
+              </div>
+              <p class="section-copy">默认收起，不占主监控区域。需要时再展开浏览最近执行记录。</p>
+            </div>
+            <div v-if="executions.length" class="timeline-browser">
+              <div class="timeline-browser-head">
+                <div class="timeline-tags">
+                  <span class="pill">总执行: {{ executions.length }}</span>
+                  <span v-if="executions[0]" class="pill">最近轮次: R{{ executionRound(executions[0]) }}</span>
+                  <span v-if="executions[0]" class="pill">最近派发: {{ formatDateTime(executions[0].dispatched_at) }}</span>
+                  <span v-if="executions[0]" :class="['status-badge', executions[0].status]">{{ statusLabel(executions[0].status) }}</span>
+                </div>
+                <button
+                  class="action action-secondary"
+                  type="button"
+                  @click="recentTimelineExpanded = !recentTimelineExpanded"
+                >
+                  {{ recentTimelineExpanded ? "收起浏览" : "浏览最近执行" }}
+                </button>
+              </div>
+              <div v-if="recentTimelineExpanded" class="timeline-list">
+                <article
+                  v-for="execution in executions.slice(0, 8)"
+                  :key="execution.id"
+                  class="timeline-card timeline-card-link"
+                  role="button"
+                  tabindex="0"
+                  @click="openExecutionDetail(execution)"
+                  @keydown.enter.prevent="openExecutionDetail(execution)"
+                >
+                <div class="timeline-card-head">
+                  <div>
+                    <h3>{{ scheduleName(execution) }}</h3>
+                    <p class="meta-line">{{ compositionSummary(executionContext(execution)) }}</p>
+                  </div>
+                  <span :class="['status-badge', execution.status]">{{ statusLabel(execution.status) }}</span>
+                </div>
+                <div class="timeline-tags">
+                  <span class="pill">派发: {{ formatDateTime(execution.dispatched_at) }}</span>
+                  <span class="pill">实验批次: {{ executionBatch(execution) }}</span>
+                  <span class="pill">反馈分: {{ execution.feedback_score ?? "-" }}</span>
+                  <span class="pill">耗时: {{ execution.latency_ms ?? "-" }} ms</span>
+                  <span
+                    v-for="chip in optimizationChips(executionContext(execution))"
+                    :key="`${execution.id}-timeline-optimization-${chip}`"
+                    class="pill"
+                  >
+                    {{ chip }}
+                  </span>
+                </div>
+                <p class="meta-line">{{ observationText(execution) }}</p>
+                <p class="meta-line">{{ execution.note || "无备注" }}</p>
+                </article>
+              </div>
+            </div>
+            <div v-else class="empty-state">最近还没有实验执行记录。</div>
+          </section>
+      </template>
+      </main>
+    </div>

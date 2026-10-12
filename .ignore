@@ -1,0 +1,22 @@
+# Search exclusions also apply when this directory is not a Git repository.
+**/.venv/
+**/node_modules/
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/*.egg-info/
+ui/dist/
+runtime/
+model_assets/mat_model/outputs/
+四元数据/
+.serena/cache/
+.superpowers/
+.DS_Store
+.env
+.env.bak
+*.db
+*.pyc
+*.log
+*.tmp
+*.bak
